@@ -76,55 +76,105 @@ int main()
     cin >> pid;
     cout << "Selected PID: " << pid << endl;
 
-    cout << "Enter byte value to search for (0-255): ";
-    int val;
-    cin >> val;
-    if (val < 0 || val > 255) {
-        cerr << "Invalid value." << endl;
-        return 1;
-    }
-    BYTE searchVal = static_cast<BYTE>(val);
-    cout << "Scanning memory for value..." << endl;
-    auto candidates = scanMemoryForByte(pid, searchVal);
-    cout << "Found " << candidates.size() << " candidate addresses." << endl;
-    // Optionally print first few candidates
-    for (size_t i = 0; i < min<size_t>(candidates.size(), 10); ++i) {
-        cout << "0x" << hex << candidates[i] << dec << endl;
-    }
-
+    // Command-based loop
+    std::vector<uintptr_t> candidates;
+    SIZE_T bytesRead = 0;
+    SIZE_T bytesWritten = 0;
     HANDLE hProcess = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, pid);
     if (!hProcess) {
-        cerr << "Failed to open process for filtering." << endl;
+        cerr << "Failed to open process with PID " << pid << ". Make sure the process is running and you have permissions." << endl;
         return 1;
     }
-    while (!candidates.empty()) {
-        cout << "\nEnter new value to filter candidates (or -1 to exit): ";
-        int newVal;
-        cin >> newVal;
-        if (newVal == -1) break;
-        if (newVal < 0 || newVal > 255) {
-            cerr << "Invalid value." << endl;
-            continue;
-        }
-        BYTE filterVal = static_cast<BYTE>(newVal);
-        std::vector<uintptr_t> filtered;
-        BYTE memByte;
-        for (auto addr : candidates) {
+    string cmd;
+    while (true) {
+        cout << "\nEnter command (scan V, list, read N, write N V, filter V, add [address], exit): ";
+        getline(cin >> ws, cmd);
+        if (cmd == "exit") break;
+        else if (cmd.rfind("scan ", 0) == 0) {
+            int val = stoi(cmd.substr(5));
+            if (val < 0 || val > 255) {
+                cout << "Invalid value." << endl;
+                continue;
+            }
+            BYTE searchVal = static_cast<BYTE>(val);
+            candidates = scanMemoryForByte(pid, searchVal);
+            cout << "Found " << candidates.size() << " candidate addresses." << endl;
+            for (size_t i = 0; i < min<size_t>(candidates.size(), 10); ++i) {
+                cout << i << ": 0x" << hex << candidates[i] << dec << endl;
+            }
+        } else if (cmd == "list") {
+            for (size_t i = 0; i < candidates.size(); ++i) {
+                cout << i << ": 0x" << hex << candidates[i] << dec << endl;
+            }
+        } else if (cmd.rfind("read ", 0) == 0) {
+            int idx = stoi(cmd.substr(5));
+            if (idx < 0 || (size_t)idx >= candidates.size()) {
+                cout << "Invalid candidate number." << endl;
+                continue;
+            }
+            BYTE val;
             SIZE_T bytesRead = 0;
-            if (ReadProcessMemory(hProcess, (LPCVOID)addr, &memByte, 1, &bytesRead) && bytesRead == 1) {
-                if (memByte == filterVal) {
-                    filtered.push_back(addr);
+            if (ReadProcessMemory(hProcess, (LPCVOID)candidates[idx], &val, 1, &bytesRead) && bytesRead == 1) {
+                cout << "Value at candidate " << idx << ": " << (int)val << endl;
+            } else {
+                cout << "Failed to read memory." << endl;
+            }
+        } else if (cmd.rfind("write ", 0) == 0) {
+            size_t pos = cmd.find(' ', 6);
+            if (pos == string::npos) { cout << "Usage: write N V" << endl; continue; }
+            int idx = stoi(cmd.substr(6, pos-6));
+            int v = stoi(cmd.substr(pos+1));
+            if (idx < 0 || (size_t)idx >= candidates.size() || v < 0 || v > 255) {
+                cout << "Invalid input." << endl;
+                continue;
+            }
+            BYTE val = static_cast<BYTE>(v);
+            SIZE_T bytesWritten = 0;
+            if (WriteProcessMemory(hProcess, (LPVOID)candidates[idx], &val, 1, &bytesWritten) && bytesWritten == 1) {
+                cout << "Wrote value " << v << " to candidate " << idx << endl;
+            } else {
+                cout << "Failed to write memory." << endl;
+            }
+        } else if (cmd.rfind("filter ", 0) == 0) {
+            int newVal = stoi(cmd.substr(7));
+            if (newVal < 0 || newVal > 255) {
+                cout << "Invalid value." << endl;
+                continue;
+            }
+            BYTE filterVal = static_cast<BYTE>(newVal);
+            std::vector<uintptr_t> filtered;
+            BYTE memByte;
+            for (auto addr : candidates) {
+                SIZE_T bytesRead = 0;
+                if (ReadProcessMemory(hProcess, (LPCVOID)addr, &memByte, 1, &bytesRead) && bytesRead == 1) {
+                    if (memByte == filterVal) {
+                        filtered.push_back(addr);
+                    }
                 }
             }
-        }
-        candidates = std::move(filtered);
-        cout << "Remaining candidates: " << candidates.size() << endl;
-        for (size_t i = 0; i < min<size_t>(candidates.size(), 10); ++i) {
-            cout << "0x" << hex << candidates[i] << dec << endl;
-        }
-        if (candidates.empty()) {
-            cout << "No candidates remain. Exiting." << endl;
-            break;
+            candidates = std::move(filtered);
+            cout << "Remaining candidates: " << candidates.size() << endl;
+            for (size_t i = 0; i < min<size_t>(candidates.size(), 10); ++i) {
+                cout << i << ": 0x" << hex << candidates[i] << dec << endl;
+            }
+            if (candidates.empty()) {
+                cout << "No candidates remain." << endl;
+            }
+        } else if (cmd.rfind("add ", 0) == 0) {
+            string addrStr = cmd.substr(4);
+            uintptr_t addr = 0;
+            try {
+                size_t idx = 0;
+                addr = stoull(addrStr, &idx, 0); // auto-detect base (0x for hex)
+                if (idx != addrStr.length()) throw std::invalid_argument("trailing");
+            } catch (...) {
+                cout << "Invalid address format. Use decimal or 0x... for hex." << endl;
+                continue;
+            }
+            candidates.push_back(addr);
+            cout << "Added address 0x" << hex << addr << dec << " as candidate " << (candidates.size()-1) << endl;
+        } else {
+            cout << "Unknown command." << endl;
         }
     }
     CloseHandle(hProcess);
