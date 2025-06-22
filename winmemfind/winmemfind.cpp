@@ -17,7 +17,7 @@ void listProcesses() {
     pe.dwSize = sizeof(pe);
     if (Process32First(hSnap, &pe)) {
         do {
-            wprintf(L"PID: %5u  Name: %ls\n", pe.th32ProcessID, pe.szExeFile);
+            wprintf(L"PID: %5u  Name: %s\n", pe.th32ProcessID, pe.szExeFile);
         } while (Process32Next(hSnap, &pe));
     }
     CloseHandle(hSnap);
@@ -80,7 +80,7 @@ int main()
     std::vector<uintptr_t> candidates;
     SIZE_T bytesRead = 0;
     SIZE_T bytesWritten = 0;
-    HANDLE hProcess = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, pid);
+    HANDLE hProcess = OpenProcess(PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION, FALSE, pid);
     if (!hProcess) {
         cerr << "Failed to open process with PID " << pid << ". Make sure the process is running and you have permissions." << endl;
         return 1;
