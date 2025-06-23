@@ -6,6 +6,8 @@
 #include <tlhelp32.h>
 #include <vector>
 #include <string>
+#include <sstream>
+#include <iomanip>
 
 using namespace std;
 
@@ -66,6 +68,60 @@ std::vector<uintptr_t> scanMemoryForByte(DWORD pid, BYTE value) {
     return results;
 }
 
+// Helper to parse a string of hex bytes into a vector<BYTE>
+std::vector<BYTE> parseByteArray(const std::string& s) {
+    std::vector<BYTE> bytes;
+    std::istringstream iss(s);
+    std::string byteStr;
+    while (iss >> byteStr) {
+        if (byteStr.size() > 2) throw std::invalid_argument("Byte too long");
+        BYTE b = (BYTE)std::stoul(byteStr, nullptr, 16);
+        bytes.push_back(b);
+    }
+    return bytes;
+}
+
+// Helper to scan memory for a byte array
+std::vector<uintptr_t> scanMemoryForBytes(DWORD pid, const std::vector<BYTE>& pattern) {
+    std::vector<uintptr_t> results;
+    if (pattern.empty()) return results;
+    HANDLE hProcess = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, pid);
+    if (!hProcess) return results;
+    SYSTEM_INFO sysInfo;
+    GetSystemInfo(&sysInfo);
+    uintptr_t addr = (uintptr_t)sysInfo.lpMinimumApplicationAddress;
+    uintptr_t maxAddr = (uintptr_t)sysInfo.lpMaximumApplicationAddress;
+    MEMORY_BASIC_INFORMATION mbi;
+    BYTE buffer[4096];
+    size_t plen = pattern.size();
+    while (addr < maxAddr) {
+        if (VirtualQueryEx(hProcess, (LPCVOID)addr, &mbi, sizeof(mbi)) == sizeof(mbi)) {
+            if ((mbi.State == MEM_COMMIT) && (mbi.Protect & (PAGE_READWRITE | PAGE_READONLY | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE))) {
+                SIZE_T bytesRead = 0;
+                uintptr_t regionBase = (uintptr_t)mbi.BaseAddress;
+                SIZE_T regionSize = mbi.RegionSize;
+                for (uintptr_t offset = 0; offset < regionSize; offset += bytesRead) {
+                    SIZE_T toRead = min(sizeof(buffer), regionSize - offset);
+                    if (ReadProcessMemory(hProcess, (LPCVOID)(regionBase + offset), buffer, toRead, &bytesRead)) {
+                        for (SIZE_T i = 0; i + plen <= bytesRead; ++i) {
+                            if (memcmp(buffer + i, pattern.data(), plen) == 0) {
+                                results.push_back(regionBase + offset + i);
+                            }
+                        }
+                    } else {
+                        break;
+                    }
+                }
+            }
+            addr = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+        } else {
+            addr += 4096;
+        }
+    }
+    CloseHandle(hProcess);
+    return results;
+}
+
 int main()
 {
     cout << "winmemfind - Memory Scanner" << endl;
@@ -87,20 +143,19 @@ int main()
     }
     string cmd;
     while (true) {
-        cout << "\nEnter command (scan V, list, read N, write N V, filter V, add [address], exit): ";
+        cout << "\nEnter command (scan BYTES, list, read N, write N BYTES, filter BYTES, add [address], exit): ";
         getline(cin >> ws, cmd);
         if (cmd == "exit") break;
         else if (cmd.rfind("scan ", 0) == 0) {
-            int val = stoi(cmd.substr(5));
-            if (val < 0 || val > 255) {
-                cout << "Invalid value." << endl;
-                continue;
-            }
-            BYTE searchVal = static_cast<BYTE>(val);
-            candidates = scanMemoryForByte(pid, searchVal);
-            cout << "Found " << candidates.size() << " candidate addresses." << endl;
-            for (size_t i = 0; i < min<size_t>(candidates.size(), 10); ++i) {
-                cout << i << ": 0x" << hex << candidates[i] << dec << endl;
+            try {
+                auto pattern = parseByteArray(cmd.substr(5));
+                candidates = scanMemoryForBytes(pid, pattern);
+                cout << "Found " << candidates.size() << " candidate addresses." << endl;
+                for (size_t i = 0; i < min<size_t>(candidates.size(), 10); ++i) {
+                    cout << i << ": 0x" << hex << candidates[i] << dec << endl;
+                }
+            } catch (...) {
+                cout << "Invalid byte array. Use e.g. 'scan DE AD BE EF' (hex bytes, space separated)." << endl;
             }
         } else if (cmd == "list") {
             for (size_t i = 0; i < candidates.size(); ++i) {
@@ -112,53 +167,61 @@ int main()
                 cout << "Invalid candidate number." << endl;
                 continue;
             }
-            BYTE val;
+            // Read up to 16 bytes for display
+            BYTE buf[16] = {0};
             SIZE_T bytesRead = 0;
-            if (ReadProcessMemory(hProcess, (LPCVOID)candidates[idx], &val, 1, &bytesRead) && bytesRead == 1) {
-                cout << "Value at candidate " << idx << ": " << (int)val << endl;
+            if (ReadProcessMemory(hProcess, (LPCVOID)candidates[idx], buf, sizeof(buf), &bytesRead) && bytesRead > 0) {
+                cout << "Value at candidate " << idx << ": ";
+                for (SIZE_T i = 0; i < bytesRead; ++i) cout << hex << (int)buf[i] << ' ';
+                cout << dec << endl;
             } else {
                 cout << "Failed to read memory." << endl;
             }
         } else if (cmd.rfind("write ", 0) == 0) {
             size_t pos = cmd.find(' ', 6);
-            if (pos == string::npos) { cout << "Usage: write N V" << endl; continue; }
+            if (pos == string::npos) { cout << "Usage: write N BYTES" << endl; continue; }
             int idx = stoi(cmd.substr(6, pos-6));
-            int v = stoi(cmd.substr(pos+1));
-            if (idx < 0 || (size_t)idx >= candidates.size() || v < 0 || v > 255) {
-                cout << "Invalid input." << endl;
-                continue;
-            }
-            BYTE val = static_cast<BYTE>(v);
-            SIZE_T bytesWritten = 0;
-            if (WriteProcessMemory(hProcess, (LPVOID)candidates[idx], &val, 1, &bytesWritten) && bytesWritten == 1) {
-                cout << "Wrote value " << v << " to candidate " << idx << endl;
-            } else {
-                cout << "Failed to write memory." << endl;
+            string bytesStr = cmd.substr(pos+1);
+            try {
+                auto bytes = parseByteArray(bytesStr);
+                DWORD oldProtect = 0;
+                if (VirtualProtectEx(hProcess, (LPVOID)candidates[idx], bytes.size(), PAGE_READWRITE, &oldProtect)) {
+                    SIZE_T bytesWritten = 0;
+                    if (WriteProcessMemory(hProcess, (LPVOID)candidates[idx], bytes.data(), bytes.size(), &bytesWritten) && bytesWritten == bytes.size()) {
+                        cout << "Wrote " << bytes.size() << " bytes to candidate " << idx << endl;
+                    } else {
+                        cout << "Failed to write memory (WriteProcessMemory failed)." << endl;
+                    }
+                    VirtualProtectEx(hProcess, (LPVOID)candidates[idx], bytes.size(), oldProtect, &oldProtect);
+                } else {
+                    cout << "Failed to change memory protection (VirtualProtectEx failed)." << endl;
+                }
+            } catch (...) {
+                cout << "Invalid byte array. Use e.g. 'write 0 DE AD BE EF' (hex bytes, space separated)." << endl;
             }
         } else if (cmd.rfind("filter ", 0) == 0) {
-            int newVal = stoi(cmd.substr(7));
-            if (newVal < 0 || newVal > 255) {
-                cout << "Invalid value." << endl;
-                continue;
-            }
-            BYTE filterVal = static_cast<BYTE>(newVal);
-            std::vector<uintptr_t> filtered;
-            BYTE memByte;
-            for (auto addr : candidates) {
-                SIZE_T bytesRead = 0;
-                if (ReadProcessMemory(hProcess, (LPCVOID)addr, &memByte, 1, &bytesRead) && bytesRead == 1) {
-                    if (memByte == filterVal) {
-                        filtered.push_back(addr);
+            try {
+                auto pattern = parseByteArray(cmd.substr(7));
+                std::vector<uintptr_t> filtered;
+                for (auto addr : candidates) {
+                    std::vector<BYTE> buf(pattern.size());
+                    SIZE_T bytesRead = 0;
+                    if (ReadProcessMemory(hProcess, (LPCVOID)addr, buf.data(), buf.size(), &bytesRead) && bytesRead == buf.size()) {
+                        if (memcmp(buf.data(), pattern.data(), buf.size()) == 0) {
+                            filtered.push_back(addr);
+                        }
                     }
                 }
-            }
-            candidates = std::move(filtered);
-            cout << "Remaining candidates: " << candidates.size() << endl;
-            for (size_t i = 0; i < min<size_t>(candidates.size(), 10); ++i) {
-                cout << i << ": 0x" << hex << candidates[i] << dec << endl;
-            }
-            if (candidates.empty()) {
-                cout << "No candidates remain." << endl;
+                candidates = std::move(filtered);
+                cout << "Remaining candidates: " << candidates.size() << endl;
+                for (size_t i = 0; i < min<size_t>(candidates.size(), 10); ++i) {
+                    cout << i << ": 0x" << hex << candidates[i] << dec << endl;
+                }
+                if (candidates.empty()) {
+                    cout << "No candidates remain." << endl;
+                }
+            } catch (...) {
+                cout << "Invalid byte array. Use e.g. 'filter DE AD BE EF' (hex bytes, space separated)." << endl;
             }
         } else if (cmd.rfind("add ", 0) == 0) {
             string addrStr = cmd.substr(4);
