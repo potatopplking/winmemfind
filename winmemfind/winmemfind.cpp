@@ -19,7 +19,7 @@ void listProcesses() {
     pe.dwSize = sizeof(pe);
     if (Process32First(hSnap, &pe)) {
         do {
-            wprintf(L"PID: %5u  Name: %s\n", pe.th32ProcessID, pe.szExeFile);
+            wprintf(L"PID: %5u  Name: %hs\n", pe.th32ProcessID, pe.szExeFile);
         } while (Process32Next(hSnap, &pe));
     }
     CloseHandle(hSnap);
@@ -157,9 +157,18 @@ int main()
             } catch (...) {
                 cout << "Invalid byte array. Use e.g. 'scan DE AD BE EF' (hex bytes, space separated)." << endl;
             }
-        } else if (cmd == "list") {
-            for (size_t i = 0; i < candidates.size(); ++i) {
+        } else if (cmd.rfind("list", 0) == 0) {
+            int maxToShow = 10;
+            if (cmd.length() > 4) {
+                std::istringstream iss(cmd.substr(4));
+                iss >> maxToShow;
+                if (maxToShow <= 0) maxToShow = 10;
+            }
+            for (size_t i = 0; i < candidates.size() && (int)i < maxToShow; ++i) {
                 cout << i << ": 0x" << hex << candidates[i] << dec << endl;
+            }
+            if ((int)candidates.size() > maxToShow) {
+                cout << "... (" << candidates.size() << " total)" << endl;
             }
         } else if (cmd.rfind("read ", 0) == 0) {
             int idx = stoi(cmd.substr(5));
@@ -236,6 +245,40 @@ int main()
             }
             candidates.push_back(addr);
             cout << "Added address 0x" << hex << addr << dec << " as candidate " << (candidates.size()-1) << endl;
+        } else if (cmd.rfind("x ", 0) == 0) {
+            std::istringstream iss(cmd.substr(2));
+            std::string addrStr, nbytesStr;
+            iss >> addrStr >> nbytesStr;
+            if (addrStr.empty() || nbytesStr.empty()) {
+                cout << "Usage: x <address> <num_bytes> (max 1000000)" << endl;
+                continue;
+            }
+            uint64_t addr = 0;
+            int nbytes = 0;
+            try {
+                size_t idx = 0;
+                addr = std::stoull(addrStr, &idx, 0); // auto-detect base
+                if (idx != addrStr.length()) throw std::invalid_argument("trailing");
+                nbytes = std::stoi(nbytesStr);
+            } catch (...) {
+                cout << "Usage: x <address> <num_bytes> (max 1000000)" << endl;
+                continue;
+            }
+            if (nbytes <= 0 || nbytes > 1000000) {
+                cout << "Usage: x <address> <num_bytes> (max 1000000)" << endl;
+                continue;
+            }
+            std::vector<BYTE> buf(nbytes);
+            SIZE_T bytesRead = 0;
+            if (ReadProcessMemory(hProcess, (LPCVOID)addr, buf.data(), nbytes, &bytesRead) && bytesRead > 0) {
+                cout << "Memory at address 0x" << hex << addr << dec << ": ";
+                for (SIZE_T i = 0; i < bytesRead; ++i) {
+                    cout << std::setw(2) << std::setfill('0') << std::hex << (int)buf[i] << ' ';
+                }
+                cout << dec << endl;
+            } else {
+                cout << "Failed to read memory." << endl;
+            }
         } else {
             cout << "Unknown command." << endl;
         }
