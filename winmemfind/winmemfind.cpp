@@ -171,20 +171,54 @@ int main()
                 cout << "... (" << candidates.size() << " total)" << endl;
             }
         } else if (cmd.rfind("read ", 0) == 0) {
-            int idx = stoi(cmd.substr(5));
+            // Usage: read <candidate_index> [offset]
+            // If offset is provided (non-negative integer), show memory from address-offset to address+offset
+            std::istringstream iss(cmd.substr(5));
+            int idx = -1;
+            long offset = 0;
+            if (!(iss >> idx)) {
+                cout << "Usage: read <candidate_index> [offset] (offset shows address-offset to address+offset)" << endl;
+                continue;
+            }
             if (idx < 0 || (size_t)idx >= candidates.size()) {
                 cout << "Invalid candidate number." << endl;
                 continue;
             }
-            // Read up to 16 bytes for display
-            BYTE buf[16] = {0};
-            SIZE_T bytesRead = 0;
-            if (ReadProcessMemory(hProcess, (LPCVOID)candidates[idx], buf, sizeof(buf), &bytesRead) && bytesRead > 0) {
-                cout << "Value at candidate " << idx << ": ";
-                for (SIZE_T i = 0; i < bytesRead; ++i) cout << hex << (int)buf[i] << ' ';
-                cout << dec << endl;
+            if (!(iss >> offset)) {
+                // No offset provided: default behaviour (read up to 16 bytes at the address)
+                BYTE buf[16] = {0};
+                SIZE_T bytesRead = 0;
+                if (ReadProcessMemory(hProcess, (LPCVOID)candidates[idx], buf, sizeof(buf), &bytesRead) && bytesRead > 0) {
+                    cout << "Value at candidate " << idx << " (0x" << hex << candidates[idx] << ") : ";
+                    for (SIZE_T i = 0; i < bytesRead; ++i) cout << hex << (int)buf[i] << ' ';
+                    cout << dec << endl;
+                } else {
+                    cout << "Failed to read memory." << endl;
+                }
             } else {
-                cout << "Failed to read memory." << endl;
+                if (offset < 0) {
+                    cout << "Offset must be non-negative." << endl;
+                    continue;
+                }
+                if (offset > 1000000) {
+                    cout << "Offset too large (max 1000000)." << endl;
+                    continue;
+                }
+                uintptr_t center = candidates[idx];
+                uintptr_t start = 0;
+                if ((uintptr_t)offset > center) start = 0;
+                else start = center - (uintptr_t)offset;
+                SIZE_T toRead = (SIZE_T)offset * 2 + 1; // range inclusive: address-offset .. address+offset
+                std::vector<BYTE> buf(toRead);
+                SIZE_T bytesRead = 0;
+                if (ReadProcessMemory(hProcess, (LPCVOID)start, buf.data(), toRead, &bytesRead) && bytesRead > 0) {
+                    cout << "Memory range 0x" << hex << start << " - 0x" << (start + bytesRead - 1) << dec << ":" << endl;
+                    for (SIZE_T i = 0; i < bytesRead; ++i) {
+                        cout << "0x" << hex << (start + i) << ": " << setw(2) << setfill('0') << (int)buf[i] << dec << endl;
+                    }
+                } else {
+                    cout << "Failed to read memory." << endl;
+                }
             }
         } else if (cmd.rfind("write ", 0) == 0) {
             size_t pos = cmd.find(' ', 6);
