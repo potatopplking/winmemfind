@@ -8,6 +8,7 @@
 #include <string>
 #include <sstream>
 #include <iomanip>
+#include <cctype>
 
 using namespace std;
 
@@ -189,9 +190,34 @@ int main()
                 BYTE buf[16] = {0};
                 SIZE_T bytesRead = 0;
                 if (ReadProcessMemory(hProcess, (LPCVOID)candidates[idx], buf, sizeof(buf), &bytesRead) && bytesRead > 0) {
-                    cout << "Value at candidate " << idx << " (0x" << hex << candidates[idx] << ") : ";
-                    for (SIZE_T i = 0; i < bytesRead; ++i) cout << hex << (int)buf[i] << ' ';
-                    cout << dec << endl;
+                    uintptr_t start = candidates[idx];
+                    // hexdump-like output: 16 bytes per line, address at left, ASCII on right
+                    const SIZE_T cols = 16;
+                    for (SIZE_T row = 0; row * cols < bytesRead; ++row) {
+                        SIZE_T rowStart = row * cols;
+                        uintptr_t rowAddr = start + rowStart;
+                        cout << hex << "0x" << rowAddr << ": ";
+                        // hex bytes
+                        for (SIZE_T i = 0; i < cols; ++i) {
+                            SIZE_T idxb = rowStart + i;
+                            if (idxb < bytesRead) {
+                                cout << setw(2) << setfill('0') << hex << (int)buf[idxb];
+                            } else {
+                                cout << "  ";
+                            }
+                            if (i % 2 == 1) cout << ' ';
+                        }
+                        // ASCII column
+                        cout << " ";
+                        for (SIZE_T i = 0; i < cols; ++i) {
+                            SIZE_T idxb = rowStart + i;
+                            if (idxb < bytesRead) {
+                                unsigned char ch = buf[idxb];
+                                cout << (isprint(ch) ? (char)ch : '.');
+                            } else cout << ' ';
+                        }
+                        cout << dec << endl;
+                    }
                 } else {
                     cout << "Failed to read memory." << endl;
                 }
@@ -212,9 +238,30 @@ int main()
                 std::vector<BYTE> buf(toRead);
                 SIZE_T bytesRead = 0;
                 if (ReadProcessMemory(hProcess, (LPCVOID)start, buf.data(), toRead, &bytesRead) && bytesRead > 0) {
-                    cout << "Memory range 0x" << hex << start << " - 0x" << (start + bytesRead - 1) << dec << ":" << endl;
-                    for (SIZE_T i = 0; i < bytesRead; ++i) {
-                        cout << "0x" << hex << (start + i) << ": " << setw(2) << setfill('0') << (int)buf[i] << dec << endl;
+                    // hexdump-like output for the entire range
+                    const SIZE_T cols = 16;
+                    for (SIZE_T row = 0; row * cols < bytesRead; ++row) {
+                        SIZE_T rowStart = row * cols;
+                        uintptr_t rowAddr = start + rowStart;
+                        cout << hex << "0x" << rowAddr << ": ";
+                        for (SIZE_T i = 0; i < cols; ++i) {
+                            SIZE_T idxb = rowStart + i;
+                            if (idxb < bytesRead) {
+                                cout << setw(2) << setfill('0') << hex << (int)buf[idxb];
+                            } else {
+                                cout << "  ";
+                            }
+                            if (i % 2 == 1) cout << ' ';
+                        }
+                        cout << " ";
+                        for (SIZE_T i = 0; i < cols; ++i) {
+                            SIZE_T idxb = rowStart + i;
+                            if (idxb < bytesRead) {
+                                unsigned char ch = buf[idxb];
+                                cout << (isprint(ch) ? (char)ch : '.');
+                            } else cout << ' ';
+                        }
+                        cout << dec << endl;
                     }
                 } else {
                     cout << "Failed to read memory." << endl;
